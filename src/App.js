@@ -15,6 +15,18 @@ export default function App() {
   const [account, setAccount] = useState(null);
   const [provider, setProvider] = useState(null);
 
+  const [stakeToken, setStakeToken] = useState("");
+  const [stakeAmount, setStakeAmount] = useState("");
+  const [nfts, setNfts] = useState([
+    { address: "", tokenId: "", metadata: null },
+    { address: "", tokenId: "", metadata: null },
+    { address: "", tokenId: "", metadata: null }
+  ]);
+
+const [validated, setValidated] = useState(false);
+const [validating, setValidating] = useState(false);
+
+
   useEffect(() => {
     if (!window.ethereum) return;
 
@@ -30,19 +42,6 @@ export default function App() {
     init();
   }, []);
 
-  /* ---------------- FORM STATE ---------------- */
-  const [stakeToken, setStakeToken] = useState("");
-  const [stakeAmount, setStakeAmount] = useState("");
-
-  const [nfts, setNfts] = useState([
-    { address: "", tokenId: "", metadata: null },
-    { address: "", tokenId: "", metadata: null },
-    { address: "", tokenId: "", metadata: null }
-  ]);
-
-  const [validated, setValidated] = useState(false);
-  const [validating, setValidating] = useState(false);
-
   /* ---------------- GAMES ---------------- */
   const [games, setGames] = useState([]);
   const [loadingGames, setLoadingGames] = useState(false);
@@ -56,22 +55,17 @@ export default function App() {
     setValidated(false);
   };
 
-  async function userOwnsNFT(nftAddress, tokenId) {
+async function userOwnsNFT(address, tokenId) {
   if (!provider || !account) return false;
 
-  try {
-    const nftContracts = new ethers.Contract(
-      nftAddress,
-      ["function ownerOf(uint256 tokenId) view returns (address)"],
-      provider
-    );
+  const nft = new ethers.Contract(
+    address,
+    ["function ownerOf(uint256) view returns (address)"],
+    provider
+  );
 
-    const owner = await nftContracts.ownerOf(tokenId);
-    return owner.toLowerCase() === account.toLowerCase();
-  } catch (err) {
-    console.error("Ownership check failed:", err);
-    return false;
-  }
+  const owner = await nft.ownerOf(tokenId);
+  return owner.toLowerCase() === account.toLowerCase();
 }
 
 function downloadRevealBackup(data) {
@@ -174,11 +168,6 @@ const revealAndMaybeSettle = useCallback(
         return;
       }
 
-if (!localStorage.getItem(saltKey)) {
-  console.warn("No salt found for auto-reveal", saltKey);
-  return;
-}
-
       // ----- Safe parsing -----
       const salt = BigInt(saltStr);
 
@@ -230,32 +219,6 @@ if (!localStorage.getItem(saltKey)) {
   },
   [signer, account, loadGames]
 );
-
-/* ---------------- AUTO-REVEAL LOOP ---------------- */
-useEffect(() => {
-  if (!account || games.length === 0) return;
-
-  const run = async () => {
-    for (const g of games) {
-      const isParticipant =
-        g.player1.toLowerCase() === account.toLowerCase() ||
-        g.player2.toLowerCase() === account.toLowerCase();
-
-      if (!isParticipant) continue;
-
-      // Only attempt reveal if NOT revealed yet
-      if (
-        (g.player1.toLowerCase() === account.toLowerCase() && !g.player1Revealed) ||
-        (g.player2.toLowerCase() === account.toLowerCase() && !g.player2Revealed)
-      ) {
-        await revealAndMaybeSettle(g.id);
-      }
-    }
-  };
-
-  const interval = setInterval(run, 7000); // slower = fewer tx attempts
-  return () => clearInterval(interval);
-}, [games, account, revealAndMaybeSettle]);
 
 /* ---------------- USE EFFECT ---------------- */
 useEffect(() => {
@@ -315,82 +278,57 @@ useEffect(() => {
 async function validateNFTOwnership() {
   for (const nft of nfts) {
     if (!nft.address || nft.tokenId === "") {
-      alert("Missing NFT address or tokenId");
-      return false;
+      throw new Error("Missing NFT address or tokenId");
     }
-
     const owns = await userOwnsNFT(nft.address, nft.tokenId);
     if (!owns) {
-      alert(`You do NOT own NFT ${nft.tokenId} at ${nft.address}`);
-      return false;
+      throw new Error(`You do not own NFT ${nft.tokenId}`);
     }
   }
-
   return true;
 }
 
-const fetchMetadataAndValidate = async () => {
+async function fetchMetadataAndValidate() {
   try {
     setValidating(true);
 
-    const payload = {
-      nfts: nfts.map(n => ({
-        address: n.address.toString(),
-        tokenId: n.tokenId.toString()
-      }))
-    };
+    await validateNFTOwnership();
 
-    const res = await fetch(`${BACKEND_URL}/games/validate`, {
+const res = await fetch(`${BACKEND_URL}/games/validate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({
+        nfts: nfts.map(n => ({
+          address: n.address,
+          tokenId: n.tokenId
+        }))
+      })
     });
 
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Validation failed");
+    if (!res.ok) throw new Error(data.error);
 
-    // Build clean arrays for localStorage and reveal backup
-    const traits = [];
-    const backgrounds = [];
-    const tokenURIs = [];
+    setNfts(prev =>
+      prev.map((n, i) => ({ ...n, metadata: data.metadata[i] }))
+    );
 
-    const plainTeamData = data.metadata.map((m, i) => {
-      const nftTraits = m.traits.map(Number);
-      if (nftTraits.some(v => Number.isNaN(v)) || nftTraits.length !== 5) {
-        throw new Error(`Invalid traits for NFT ${m.tokenId}`);
-      }
+    localStorage.setItem("p1_backgrounds",
+      JSON.stringify(data.metadata.map(m => m.background))
+    );
 
-      traits.push(nftTraits);
-      backgrounds.push(m.background || "Unknown");
-      tokenURIs.push(m.tokenURI || null);
+    localStorage.setItem("p1_traits",
+      JSON.stringify(data.metadata.map(m => m.traits))
+    );
 
-      return {
-        address: nfts[i].address,
-        tokenId: nfts[i].tokenId,
-        background: m.background || "Unknown",
-        traits: nftTraits,
-        tokenURI: m.tokenURI || null
-      };
-    });
-
-    setNfts(prev => prev.map((n, i) => ({ ...n, metadata: plainTeamData[i] })));
     setValidated(true);
-
-    // Local storage for previews
-    debugForLocalStorage("p1_traits", traits);
-    localStorage.setItem("p1_traits", JSON.stringify(traits));
-    debugForLocalStorage("p1_backgrounds", backgrounds);
-    localStorage.setItem("p1_backgrounds", JSON.stringify(backgrounds));
-
-    alert("Team valid");
+    alert("Team validated");
   } catch (err) {
-    console.error("Validation failed:", err);
-    alert(err.message || "Validation failed");
     setValidated(false);
+    alert(err.message);
   } finally {
     setValidating(false);
   }
-};
+}
 
   /* ---------------- APPROVAL ---------------- */
   const approveTokens = async () => {
@@ -511,107 +449,59 @@ async function handleRevealFile(e) {
 }
 
 // ---------------- CREATE GAME ----------------
-const createGame = async () => {
-  const ownsAll = await validateNFTOwnership();
-  if (!ownsAll) return;
+async function createGame() {
+  if (!validated || !signer) return;
 
-  if (!signer || !stakeToken || !stakeAmount || !validated) {
-    alert("Missing info or validation");
-    return;
+  const erc20 = new ethers.Contract(stakeToken, ERC20ABI, signer);
+  const game = new ethers.Contract(GAME_ADDRESS, GameABI, signer);
+
+  const stakeWei = ethers.parseUnits(stakeAmount, 18);
+  const allowance = await erc20.allowance(account, GAME_ADDRESS);
+
+  if (allowance < stakeWei) {
+    await (await erc20.approve(GAME_ADDRESS, stakeWei)).wait();
   }
 
-  try {
-    const erc20 = new ethers.Contract(stakeToken, ERC20ABI, signer);
-    const game = new ethers.Contract(GAME_ADDRESS, GameABI, signer);
-    const stakeWei = ethers.parseUnits(stakeAmount.trim(), 18);
+  const salt = ethers.toBigInt(ethers.randomBytes(32));
+  const tokenIds = nfts.map(n => BigInt(n.tokenId));
+  const nftContracts = nfts.map(n => n.address);
 
-    const allowance = await erc20.allowance(account, GAME_ADDRESS);
-    if (allowance < stakeWei) {
-      const approveTx = await erc20.approve(GAME_ADDRESS, stakeWei);
-      await approveTx.wait();
-    }
+  const commit = ethers.solidityPackedKeccak256(
+    ["uint256","address","address","address","uint256","uint256","uint256"],
+    [salt, ...nftContracts, ...tokenIds]
+  );
 
-    const salt = ethers.toBigInt(ethers.randomBytes(32));
-    const nftContracts = nfts.map(n => n.address.toString());
-    const tokenIds = nfts.map(n => BigInt(n.tokenId));
-    const backgrounds = nfts.map(n => n.metadata.background);
+  const tx = await game.createGame(stakeToken, stakeWei, commit);
+  const receipt = await tx.wait();
 
-    const commit = ethers.solidityPackedKeccak256(
-      ["uint256","address","address","address","uint256","uint256","uint256"],
-      [salt, nftContracts[0], nftContracts[1], nftContracts[2], tokenIds[0], tokenIds[1], tokenIds[2]]
-    );
+localStorage.setItem("p1_salt", salt.toString());
+localStorage.setItem("p1_tokenIds", JSON.stringify(tokenIds.map(t => t.toString())));
+localStorage.setItem("p1_nftContracts", JSON.stringify(nftContracts));
 
-    const tx = await game.createGame(stakeToken, stakeWei, commit);
-    const receipt = await tx.wait();
+const event = receipt.logs
+  .map(l => {
+    try { return game.interface.parseLog(l); } catch { return null; }
+  })
+  .find(e => e?.name === "GameCreated");
 
-    const parsed = receipt.logs
-      .map(l => { try { return game.interface.parseLog(l); } catch { return null } })
-      .find(e => e?.name === "GameCreated");
+if (!event) throw new Error("GameCreated not found");
 
-    const gameId = parsed.args.gameId.toString();
+const gameId = Number(event.args.gameId);
 
-    // --- Safe _player1 ---
-    const _player1 = {
-      teamData: nfts.map(n => ({
-        address: n.address,
-        tokenId: n.tokenId,
-        background: n.metadata.background,
-        traits: [...n.metadata.traits],
-        tokenURI: n.metadata.tokenURI
-      })),
-      tokenURIs: [...nfts.map(n => n.metadata.tokenURI)],
-      revealed: false
-    };
+downloadRevealBackup({
+  gameId,
+  player: account,
+  salt: salt.toString(),
+  nftContracts,
+  tokenIds: tokenIds.map(String),
+  backgrounds: JSON.parse(localStorage.getItem("p1_backgrounds"))
+});
 
-    setGames(prev => [...prev, {
-      id: Number(gameId),
-      creator: account,
-      stakeToken,
-      stakeAmount: stakeWei,
-      player1: account,
-      player2: null,
-      createdAt: new Date().toISOString(),
-      player2JoinedAt: null,
-      settled: false,
-      winner: ethers.ZeroAddress,
-      tie: false,
-      revealReady: false,
-      _player1,
-      _player2: null
-    }]);
-
-    // Save reveal backup
-    const revealBackup = {
-      gameId,
-      player: account,
-      salt: salt.toString(),
-      nftContracts,
-      tokenIds: tokenIds.map(t => t.toString()),
-      backgrounds
-    };
-    downloadRevealBackup(revealBackup);
-
-    debugForLocalStorage("p1_salt", salt.toString());
-    localStorage.setItem("p1_salt", salt.toString());
-    debugForLocalStorage("p1_tokenIds", tokenIds.map(t => t.toString()));
-    localStorage.setItem("p1_tokenIds", JSON.stringify(tokenIds.map(t => t.toString())));
-    debugForLocalStorage("p1_backgrounds", backgrounds);
-    localStorage.setItem("p1_backgrounds", JSON.stringify(backgrounds));
-    debugForLocalStorage("p1_nftContracts", nftContracts);
-    localStorage.setItem("p1_nftContracts", JSON.stringify(nftContracts));
-
-    alert("Game created successfully");
-    await loadGames();
-  } catch (err) {
-    console.error("Create game failed:", err);
-    alert(err.reason || err.message || "Create game failed");
-  }
-};
+  await loadGames();
+}
 
 // ---------------- JOIN GAME ----------------
 const joinGame = async (gameId) => {
-  const ownsAll = await validateNFTOwnership();
-  if (!ownsAll || !signer) return;
 
   if (!validated) {
     alert("Validate your team before joining");
@@ -635,13 +525,11 @@ const joinGame = async (gameId) => {
 
     const traits = [];
     const backgrounds = [];
-    const tokenURIs = [];
 
     data.metadata.forEach((m, i) => {
       const nftTraits = m.traits.map(Number);
       traits.push(nftTraits);
       backgrounds.push(m.background || "Unknown");
-      tokenURIs.push(m.tokenURI || null);
     });
 
     const game = new ethers.Contract(GAME_ADDRESS, GameABI, signer);
@@ -664,9 +552,7 @@ const joinGame = async (gameId) => {
         tokenId: n.tokenId,
         background: backgrounds[i],
         traits: [...traits[i]],
-        tokenURI: tokenURIs[i]
       })),
-      tokenURIs: [...tokenURIs],
       revealed: false
     };
 // AFTER backend validation succeeds
